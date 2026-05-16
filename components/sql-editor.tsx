@@ -31,6 +31,10 @@ import {
 } from "lucide-react";
 import type { SQLQuestion } from "@/lib/data";
 import { checkSqlAnswer } from "@/lib/data";
+import {
+  executeSqlQuery,
+  type QueryExecutionResult,
+} from "@/lib/data/sql-runner";
 import { markQuestionComplete } from "@/lib/data/progress";
 
 interface SQLEditorProps {
@@ -49,8 +53,15 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
   const [showHint, setShowHint] = useState(false);
   const [showSolution, setShowSolution] = useState(false);
   const [showExpectedOutput, setShowExpectedOutput] = useState(false);
+  const [queryOutput, setQueryOutput] = useState<QueryExecutionResult | null>(null);
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [isRunningQuery, setIsRunningQuery] = useState(false);
 
-  const handleCheck = useCallback(() => {
+  const handleCheck = useCallback(async () => {
+    setIsRunningQuery(true);
+    setQueryOutput(null);
+    setQueryError(null);
+
     const checkResult = checkSqlAnswer(sql, question);
     setResult(checkResult);
     
@@ -60,6 +71,16 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
     if (onComplete) {
       onComplete(checkResult.isCorrect);
     }
+
+    try {
+      const output = await executeSqlQuery(sql, question.database);
+      setQueryOutput(output);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to run query.";
+      setQueryError(message);
+    } finally {
+      setIsRunningQuery(false);
+    }
   }, [sql, question, onComplete]);
 
   const handleReset = useCallback(() => {
@@ -68,6 +89,9 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
     setShowHint(false);
     setShowSolution(false);
     setShowExpectedOutput(false);
+    setQueryOutput(null);
+    setQueryError(null);
+    setIsRunningQuery(false);
   }, [question.starterSql]);
 
   return (
@@ -116,9 +140,9 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
           />
 
           <div className="flex flex-wrap gap-2">
-            <Button onClick={handleCheck} className="gap-2">
+            <Button onClick={handleCheck} className="gap-2" disabled={isRunningQuery}>
               <Play className="h-4 w-4" />
-              Check Answer
+              {isRunningQuery ? "Running..." : "Check Answer"}
             </Button>
             <Button variant="outline" onClick={handleReset} className="gap-2">
               <RotateCcw className="h-4 w-4" />
@@ -239,6 +263,57 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
                 )}
               </div>
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Your Query Output */}
+      {(queryOutput || queryError || isRunningQuery) && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Your Query Output</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {isRunningQuery && (
+              <p className="text-sm text-muted-foreground">Running query...</p>
+            )}
+
+            {!isRunningQuery && queryError && (
+              <p className="text-sm text-destructive">{queryError}</p>
+            )}
+
+            {!isRunningQuery && !queryError && queryOutput && (
+              <>
+                {queryOutput.rows.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Query ran successfully but returned 0 rows.</p>
+                ) : (
+                  <div className="rounded-lg border overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-muted/50">
+                          {queryOutput.columns.map((col) => (
+                            <TableHead key={col} className="font-mono text-xs">
+                              {col}
+                            </TableHead>
+                          ))}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {queryOutput.rows.map((row, idx) => (
+                          <TableRow key={idx}>
+                            {queryOutput.columns.map((col) => (
+                              <TableCell key={col} className="font-mono text-xs">
+                                {String(row[col] ?? "NULL")}
+                              </TableCell>
+                            ))}
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </>
+            )}
           </CardContent>
         </Card>
       )}

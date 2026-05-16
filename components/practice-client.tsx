@@ -2,9 +2,9 @@
 
 import { useState, useMemo, useEffect } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { Header } from "@/components/header";
-import { SQLEditor } from "@/components/sql-editor";
 import { SchemaViewer } from "@/components/schema-viewer";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -42,6 +42,11 @@ import {
   type Difficulty,
   type DatabaseName,
 } from "@/lib/data";
+
+const SQLEditor = dynamic(
+  () => import("@/components/sql-editor").then((mod) => mod.SQLEditor),
+  { ssr: false },
+);
 
 const topics: Topic[] = [
   "SELECT",

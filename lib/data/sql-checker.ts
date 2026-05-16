@@ -26,6 +26,23 @@ function normalizeSql(sql: string): string {
     .trim();
 }
 
+function normalizeSqlExact(sql: string): string {
+  return sql
+    .replace(/\s+/g, " ")
+    .replace(/\s*,\s*/g, ", ")
+    .replace(/\s*\(\s*/g, "(")
+    .replace(/\s*\)\s*/g, ")")
+    .replace(/\s*=\s*/g, " = ")
+    .replace(/\s*>\s*/g, " > ")
+    .replace(/\s*<\s*/g, " < ")
+    .replace(/\s*>=\s*/g, " >= ")
+    .replace(/\s*<=\s*/g, " <= ")
+    .replace(/\s*<>\s*/g, " <> ")
+    .replace(/\s*!=\s*/g, " != ")
+    .replace(/;+\s*$/, "")
+    .trim();
+}
+
 // Known columns and tables from our database schemas - COMPREHENSIVE
 const KNOWN_SCHEMA: Record<string, string[]> = {
   // City database
@@ -156,7 +173,7 @@ function extractTableNames(sql: string): string[] {
 function isValidSelectClause(sql: string): { valid: boolean; reason: string } {
   const normalized = sql.toLowerCase();
   
-  const match = normalized.match(/\bselect\s+(.*?)\s+from\b/s);
+  const match = normalized.match(/\bselect\s+([\s\S]*?)\s+from\b/);
   if (!match) {
     return { valid: false, reason: "Missing FROM clause." };
   }
@@ -201,7 +218,7 @@ function extractSelectedColumns(sql: string): string[] {
     return ["*"];
   }
   
-  const match = normalized.match(/\bselect\s+(distinct\s+)?(.+?)\s+from\b/s);
+  const match = normalized.match(/\bselect\s+(distinct\s+)?([\s\S]+?)\s+from\b/);
   if (match) {
     const columnsStr = match[2];
     const columns: string[] = [];
@@ -235,9 +252,51 @@ function extractSelectedColumns(sql: string): string[] {
   return [];
 }
 
+// Normalize a SELECT expression for strict comparison.
+function normalizeSelectExpression(expr: string): string {
+  return expr
+    .toLowerCase()
+    .replace(/\s+as\s+\w+$/, "")
+    .replace(/^\w+\./, "")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function hasDistinctAfterSelect(sql: string): boolean {
+  return /^\s*select\s+distinct\b/i.test(sql);
+}
+
+function hasInvalidDistinctUsage(sql: string): boolean {
+  // Invalid patterns such as district(distinct) should not be accepted.
+  return /\(\s*distinct\s*\)/i.test(sql);
+}
+
+function haveSameItems(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+
+  const counts = new Map<string, number>();
+  for (const item of a) {
+    counts.set(item, (counts.get(item) || 0) + 1);
+  }
+
+  for (const item of b) {
+    const current = counts.get(item);
+    if (!current) return false;
+    if (current === 1) {
+      counts.delete(item);
+    } else {
+      counts.set(item, current - 1);
+    }
+  }
+
+  return counts.size === 0;
+}
+
 // Extract all identifiers from user SQL for typo checking
 function extractAllIdentifiers(sql: string): string[] {
   const normalized = sql.toLowerCase();
+  // Ignore text inside single/double quotes so filter values are not treated as identifiers.
+  const withoutLiterals = normalized.replace(/'[^']*'|"[^"]*"/g, " ");
   const sqlKeywords = new Set([
     'select', 'from', 'where', 'and', 'or', 'not', 'in', 'between', 
     'like', 'is', 'null', 'as', 'on', 'join', 'left', 'right', 'inner', 'outer', 
@@ -247,14 +306,13 @@ function extractAllIdentifiers(sql: string): string[] {
     'else', 'end', 'exists', 'any', 'all', 'union', 'intersect', 'except'
   ]);
   
-  const tokens = normalized.match(/\b[a-z_][a-z0-9_]*\b/g) || [];
+  const tokens = withoutLiterals.match(/\b[a-z_][a-z0-9_]*\b/g) || [];
   return tokens.filter(t => !sqlKeywords.has(t));
 }
 
 // Extract WHERE clause
 function extractWhereClause(sql: string): string | null {
-  const normalized = sql.toLowerCase();
-  const match = normalized.match(/\bwhere\s+(.+?)(?:\s+group\s+by|\s+order\s+by|\s+having|\s+limit|$)/);
+  const match = sql.match(/\bwhere\s+(.+?)(?:\s+group\s+by|\s+order\s+by|\s+having|\s+limit|$)/i);
   return match ? match[1].trim() : null;
 }
 
@@ -265,16 +323,28 @@ function extractWhereElements(whereClause: string | null): { columns: string[], 
   const columns: string[] = [];
   const values: string[] = [];
   const operators: string[] = [];
+
+  // Handle BETWEEN separately so both boundary values are captured.
+  const betweenRegex = /(\w+)\s+between\s+(?:'([^']*)'|"([^"]*)"|(\d+(?:\.\d+)?))\s+and\s+(?:'([^']*)'|"([^"]*)"|(\d+(?:\.\d+)?))/gi;
+  let betweenMatch;
+  while ((betweenMatch = betweenRegex.exec(whereClause)) !== null) {
+    columns.push(betweenMatch[1].toLowerCase());
+    operators.push("between");
+    const startValue = betweenMatch[2] || betweenMatch[3] || betweenMatch[4];
+    const endValue = betweenMatch[5] || betweenMatch[6] || betweenMatch[7];
+    if (startValue) values.push(startValue);
+    if (endValue) values.push(endValue);
+  }
   
   // Match patterns like: column = 'value', column > 5, column LIKE '%text%', column BETWEEN x AND y
-  const conditionRegex = /(\w+)\s*(=|!=|<>|>=|<=|>|<|like|in|between|is)\s*(?:'([^']*)'|"([^"]*)"|(\d+(?:\.\d+)?)|(\w+))/gi;
+  const conditionRegex = /(\w+)\s*(=|!=|<>|>=|<=|>|<|like|in|is)\s*(?:'([^']*)'|"([^"]*)"|(\d+(?:\.\d+)?)|(\w+))/gi;
   let match;
   
   while ((match = conditionRegex.exec(whereClause)) !== null) {
     columns.push(match[1].toLowerCase());
     operators.push(match[2].toLowerCase());
     const value = match[3] || match[4] || match[5] || match[6];
-    if (value) values.push(value.toLowerCase());
+    if (value) values.push(value);
   }
   
   return { columns, values, operators };
@@ -321,6 +391,13 @@ function extractHaving(sql: string): string | null {
   const normalized = sql.toLowerCase();
   const match = normalized.match(/\bhaving\s+(.+?)(?:\s+order\s+by|\s+limit|$)/);
   return match ? match[1].trim() : null;
+}
+
+function extractLimit(sql: string): number | null {
+  const normalized = sql.toLowerCase();
+  const match = normalized.match(/\blimit\s+(\d+)\b/);
+  if (!match) return null;
+  return Number(match[1]);
 }
 
 // Check for aggregate functions
@@ -392,6 +469,8 @@ export function checkSqlAnswer(
 ): CheckResult {
   const userNormalized = normalizeSql(userSql);
   const expectedNormalized = normalizeSql(question.expectedSql);
+  const userExactNormalized = normalizeSqlExact(userSql);
+  const expectedExactNormalized = normalizeSqlExact(question.expectedSql);
   
   // Empty check
   if (!userSql.trim()) {
@@ -404,7 +483,7 @@ export function checkSqlAnswer(
   }
   
   // Exact match (normalized)
-  if (userNormalized === expectedNormalized) {
+  if (userExactNormalized === expectedExactNormalized) {
     return {
       isCorrect: true,
       feedback: "Perfect! Your SQL query matches the expected solution.",
@@ -448,6 +527,15 @@ export function checkSqlAnswer(
       missingKeywords,
     };
   }
+
+  if (hasInvalidDistinctUsage(userSql)) {
+    return {
+      isCorrect: false,
+      feedback: "DISTINCT must come right after SELECT (for example: SELECT DISTINCT column_name FROM table_name).",
+      matchedKeywords,
+      missingKeywords,
+    };
+  }
   
   // 4. CHECK FOR TYPOS IN ALL IDENTIFIERS
   const validTables = getAllValidTables();
@@ -463,7 +551,7 @@ export function checkSqlAnswer(
     
     // Check if it's a typo of a valid identifier
     const suggestion = findSimilar(identifier, allValid, 2);
-    if (suggestion) {
+    if (suggestion && suggestion.length > 2) {
       return {
         isCorrect: false,
         feedback: `"${identifier}" looks like a typo. Did you mean "${suggestion}"?`,
@@ -478,6 +566,27 @@ export function checkSqlAnswer(
   const expectedTables = extractTableNames(question.expectedSql);
   const userColumns = extractSelectedColumns(userSql);
   const expectedColumns = extractSelectedColumns(question.expectedSql);
+
+  const expectedHasDistinct = hasDistinctAfterSelect(question.expectedSql);
+  const userHasDistinct = hasDistinctAfterSelect(userSql);
+
+  if (expectedHasDistinct && !userHasDistinct) {
+    return {
+      isCorrect: false,
+      feedback: "Use DISTINCT immediately after SELECT for this question.",
+      matchedKeywords,
+      missingKeywords: ["DISTINCT", ...missingKeywords.filter(k => k !== "DISTINCT")],
+    };
+  }
+
+  if (!expectedHasDistinct && userHasDistinct) {
+    return {
+      isCorrect: false,
+      feedback: "DISTINCT is not needed for this question.",
+      matchedKeywords,
+      missingKeywords,
+    };
+  }
   
   const userWhere = extractWhereClause(userSql);
   const expectedWhere = extractWhereClause(question.expectedSql);
@@ -492,6 +601,9 @@ export function checkSqlAnswer(
   
   const userHaving = extractHaving(userSql);
   const expectedHaving = extractHaving(question.expectedSql);
+
+  const userLimit = extractLimit(userSql);
+  const expectedLimit = extractLimit(question.expectedSql);
   
   const userAggregates = hasAggregateFunctions(userSql);
   const expectedAggregates = hasAggregateFunctions(question.expectedSql);
@@ -516,6 +628,10 @@ export function checkSqlAnswer(
     }
     errors.push(`You need to query from the ${missingTables.map(t => t.toUpperCase()).join(", ")} table.`);
   }
+
+  if (wrongTables.length > 0) {
+    errors.push(`This query should not include ${wrongTables.map(t => t.toUpperCase()).join(", ")}.`);
+  }
   
   // 6. Check SELECT * when expected
   if (expectedColumns.includes("*")) {
@@ -532,6 +648,8 @@ export function checkSqlAnswer(
   // 7. Check WHERE clause content
   if (expectedWhere && !userWhere) {
     errors.push("You need a WHERE clause to filter the results.");
+  } else if (!expectedWhere && userWhere) {
+    errors.push("This question does not require a WHERE clause.");
   } else if (expectedWhere && userWhere) {
     // Check column names in WHERE
     const missingWhereCols = expectedWhereElements.columns.filter(c => 
@@ -583,11 +701,23 @@ export function checkSqlAnswer(
         };
       }
     }
+
+    const extraWhereCols = userWhereElements.columns.filter(c => !expectedWhereElements.columns.includes(c));
+    if (extraWhereCols.length > 0) {
+      errors.push(`Your WHERE clause has extra conditions (${extraWhereCols.join(", ")}) not required for this question.`);
+    }
+
+    const extraWhereValues = userWhereElements.values.filter(v => !expectedWhereElements.values.includes(v));
+    if (extraWhereValues.length > 0 && extraWhereCols.length === 0) {
+      errors.push("Your WHERE clause includes extra filter values that change the expected result.");
+    }
   }
   
   // 8. Check ORDER BY clause
   if (expectedOrderBy.clause && !userOrderBy.clause) {
     errors.push("You need an ORDER BY clause to sort the results.");
+  } else if (!expectedOrderBy.clause && userOrderBy.clause) {
+    errors.push("This question does not require ORDER BY.");
   } else if (expectedOrderBy.clause && userOrderBy.clause) {
     // Check ORDER BY columns
     const missingOrderCols = expectedOrderBy.columns.filter(c => 
@@ -628,11 +758,17 @@ export function checkSqlAnswer(
         };
       }
     }
+
+    if (userOrderBy.columns.length > expectedOrderBy.columns.length) {
+      errors.push("Your ORDER BY has extra columns that are not required for this question.");
+    }
   }
   
   // 9. Check GROUP BY clause
   if (expectedGroupBy.clause && !userGroupBy.clause) {
     errors.push("You need a GROUP BY clause to group the results.");
+  } else if (!expectedGroupBy.clause && userGroupBy.clause) {
+    errors.push("This question does not require GROUP BY.");
   } else if (expectedGroupBy.clause && userGroupBy.clause) {
     const missingGroupCols = expectedGroupBy.columns.filter(c => 
       !userGroupBy.columns.some(uc => uc.includes(c) || c.includes(uc))
@@ -661,6 +797,23 @@ export function checkSqlAnswer(
   // 10. Check HAVING clause
   if (expectedHaving && !userHaving) {
     errors.push("You need a HAVING clause to filter grouped results.");
+  } else if (!expectedHaving && userHaving) {
+    errors.push("This question does not require HAVING.");
+  } else if (expectedHaving && userHaving) {
+    const normalizedUserHaving = normalizeSqlExact(userHaving).toLowerCase();
+    const normalizedExpectedHaving = normalizeSqlExact(expectedHaving).toLowerCase();
+    if (normalizedUserHaving !== normalizedExpectedHaving) {
+      errors.push("Your HAVING clause condition does not match the expected filter.");
+    }
+  }
+
+  // 10.5 Check LIMIT clause
+  if (expectedLimit !== null && userLimit === null) {
+    errors.push("You need a LIMIT clause for this question.");
+  } else if (expectedLimit === null && userLimit !== null) {
+    errors.push("This question does not require LIMIT.");
+  } else if (expectedLimit !== null && userLimit !== null && expectedLimit !== userLimit) {
+    errors.push(`Use LIMIT ${expectedLimit} for this question.`);
   }
   
   // 11. Check aggregate functions
@@ -692,30 +845,45 @@ export function checkSqlAnswer(
   
   // Final structural check - all key elements must match
   const tablesMatch = expectedTables.every(t => userTables.includes(t));
-  const columnsMatch = expectedColumns.includes("*") 
-    ? userColumns.includes("*")
-    : expectedColumns.every(c => {
-        const cNorm = c.toLowerCase().replace(/^\w+\./, "");
-        return userColumns.some(uc => uc.toLowerCase().replace(/^\w+\./, "").includes(cNorm));
-      });
-  const whereMatch = !expectedWhere || (userWhere && 
-    expectedWhereElements.columns.every(c => userWhereElements.columns.includes(c)) &&
-    expectedWhereElements.values.every(v => userWhereElements.values.includes(v))
+  const exactTablesMatch = tablesMatch && userTables.every(t => expectedTables.includes(t));
+  const columnsMatch = expectedColumns.includes("*")
+    ? userColumns.length === 1 && userColumns[0] === "*"
+    : haveSameItems(
+        expectedColumns.map(normalizeSelectExpression),
+        userColumns.map(normalizeSelectExpression),
+      );
+  const whereMatch = !expectedWhere || (userWhere &&
+    haveSameItems(expectedWhereElements.columns, userWhereElements.columns) &&
+    haveSameItems(expectedWhereElements.values, userWhereElements.values) &&
+    haveSameItems(expectedWhereElements.operators, userWhereElements.operators)
   );
   const orderByMatch = !expectedOrderBy.clause || (userOrderBy.clause &&
-    expectedOrderBy.columns.every(c => userOrderBy.columns.includes(c))
+    expectedOrderBy.columns.length === userOrderBy.columns.length &&
+    expectedOrderBy.columns.every((c, idx) => userOrderBy.columns[idx] === c) &&
+    expectedOrderBy.directions.length === userOrderBy.directions.length &&
+    expectedOrderBy.directions.every((d, idx) => userOrderBy.directions[idx] === d)
   );
   const groupByMatch = !expectedGroupBy.clause || (userGroupBy.clause &&
-    expectedGroupBy.columns.every(c => userGroupBy.columns.some(uc => uc.includes(c) || c.includes(uc)))
+    haveSameItems(
+      expectedGroupBy.columns.map(c => c.toLowerCase().replace(/^\w+\./, "")),
+      userGroupBy.columns.map(c => c.toLowerCase().replace(/^\w+\./, "")),
+    )
   );
-  const havingMatch = !expectedHaving || userHaving;
+  const havingMatch = !expectedHaving || (userHaving &&
+    normalizeSqlExact(userHaving).toLowerCase() === normalizeSqlExact(expectedHaving).toLowerCase()
+  );
+  const limitMatch = expectedLimit === userLimit;
   const aggregatesMatch = expectedAggregates.every(a => userAggregates.includes(a));
   const windowMatch = expectedWindowFuncs.every(w => userWindowFuncs.includes(w));
   
-  const isCorrect = tablesMatch && columnsMatch && whereMatch && orderByMatch && 
-                    groupByMatch && havingMatch && aggregatesMatch && windowMatch;
+  const distinctMatch = expectedHasDistinct ? userHasDistinct : true;
+
+  const isCorrect = exactTablesMatch && columnsMatch && whereMatch && orderByMatch && 
+                    groupByMatch && havingMatch && limitMatch && aggregatesMatch && windowMatch;
+                    
+  const finalIsCorrect = isCorrect && distinctMatch;
   
-  if (isCorrect) {
+  if (finalIsCorrect) {
     return {
       isCorrect: true,
       feedback: "Good job! Your query structure is correct and should produce the expected results.",
