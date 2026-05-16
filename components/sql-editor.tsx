@@ -294,6 +294,57 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
     setIsRunningQuery(false);
   }, [question.starterSql]);
 
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key !== "Enter") return;
+      
+      // Prevent default Enter behavior
+      e.preventDefault();
+      
+      const textarea = e.currentTarget;
+      const { selectionStart } = textarea;
+      
+      // Get current line
+      const currentLineStart = sql.lastIndexOf("\n", selectionStart - 1) + 1;
+      const currentLine = sql.substring(currentLineStart, selectionStart);
+      
+      // Calculate indentation based on context
+      let indent = "  "; // 2 spaces default
+      
+      // Check if we're after a keyword that should increase indentation
+      const sqlAbove = sql.substring(0, selectionStart).toLowerCase();
+      const keywords = ["select", "from", "where", "join", "on", "group by", "having", "order by"];
+      
+      for (const keyword of keywords) {
+        if (sqlAbove.includes(keyword)) {
+          // Check if current line has content after the keyword
+          const keywordIndex = sqlAbove.lastIndexOf(keyword);
+          const afterKeyword = sql.substring(keywordIndex + keyword.length, selectionStart).trim();
+          
+          // If this line just has the keyword or is empty, indent the next line
+          if (!afterKeyword || currentLine.trim().length === 0) {
+            indent = "  ";
+            break;
+          }
+        }
+      }
+      
+      // Preserve existing indentation on the current line if it exists
+      const existingIndent = currentLine.match(/^(\s*)/)?.[1] || "";
+      
+      // Insert newline with indentation
+      const newSql = sql.substring(0, selectionStart) + "\n" + indent + sql.substring(selectionStart);
+      setSql(newSql);
+      
+      // Restore cursor position after re-render
+      setTimeout(() => {
+        textarea.selectionStart = selectionStart + 1 + indent.length;
+        textarea.selectionEnd = selectionStart + 1 + indent.length;
+      }, 0);
+    },
+    [sql, setSql],
+  );
+
   const expectedColumns = resolvedExpectedOutput?.columns ?? question.expectedColumns;
   const expectedRows = resolvedExpectedOutput?.rows ?? question.expectedRows;
 
@@ -337,6 +388,7 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
           <Textarea
             value={sql}
             onChange={(e) => setSql(e.target.value)}
+            onKeyDown={handleKeyDown}
             placeholder="SELECT ..."
             className="min-h-[150px] font-mono text-sm"
             spellCheck={false}

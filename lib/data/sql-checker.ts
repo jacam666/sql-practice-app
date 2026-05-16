@@ -312,7 +312,8 @@ function extractAllIdentifiers(sql: string): string[] {
 
 // Extract WHERE clause
 function extractWhereClause(sql: string): string | null {
-  const match = sql.match(/\bwhere\s+(.+?)(?:\s+group\s+by|\s+order\s+by|\s+having|\s+limit|$)/i);
+  const normalized = sql.toLowerCase().replace(/\s+/g, ' ');
+  const match = normalized.match(/\bwhere\s+(.+?)(?:\s+group\s+by|\s+order\s+by|\s+having|\s+limit|$)/);
   return match ? match[1].trim() : null;
 }
 
@@ -352,7 +353,7 @@ function extractWhereElements(whereClause: string | null): { columns: string[], 
 
 // Extract ORDER BY clause
 function extractOrderBy(sql: string): { clause: string | null, columns: string[], directions: string[] } {
-  const normalized = sql.toLowerCase();
+  const normalized = sql.toLowerCase().replace(/\s+/g, ' ');
   const match = normalized.match(/\border\s+by\s+(.+?)(?:\s+limit|$)/);
   
   if (!match) return { clause: null, columns: [], directions: [] };
@@ -375,7 +376,7 @@ function extractOrderBy(sql: string): { clause: string | null, columns: string[]
 
 // Extract GROUP BY clause
 function extractGroupBy(sql: string): { clause: string | null, columns: string[] } {
-  const normalized = sql.toLowerCase();
+  const normalized = sql.toLowerCase().replace(/\s+/g, ' ');
   const match = normalized.match(/\bgroup\s+by\s+(.+?)(?:\s+having|\s+order\s+by|\s+limit|$)/);
   
   if (!match) return { clause: null, columns: [] };
@@ -388,7 +389,7 @@ function extractGroupBy(sql: string): { clause: string | null, columns: string[]
 
 // Extract HAVING clause
 function extractHaving(sql: string): string | null {
-  const normalized = sql.toLowerCase();
+  const normalized = sql.toLowerCase().replace(/\s+/g, ' ');
   const match = normalized.match(/\bhaving\s+(.+?)(?:\s+order\s+by|\s+limit|$)/);
   return match ? match[1].trim() : null;
 }
