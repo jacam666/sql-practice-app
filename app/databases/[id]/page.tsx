@@ -9,15 +9,25 @@ import { getDatabase } from "@/lib/data";
 
 interface DatabasePageProps {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ from?: string | string[] }>;
 }
 
-export default async function DatabasePage({ params }: DatabasePageProps) {
+export default async function DatabasePage({ params, searchParams }: DatabasePageProps) {
   const { id } = await params;
+  const resolvedSearchParams = await searchParams;
   const database = getDatabase(id);
 
   if (!database) {
     notFound();
   }
+
+  const fromParam = Array.isArray(resolvedSearchParams.from)
+    ? resolvedSearchParams.from[0]
+    : resolvedSearchParams.from;
+  const practiceHref =
+    fromParam && fromParam.startsWith("/practice")
+      ? fromParam
+      : `/practice?database=${database.id}`;
 
   return (
     <div className="min-h-screen bg-background">
@@ -48,7 +58,7 @@ export default async function DatabasePage({ params }: DatabasePageProps) {
               ))}
             </div>
           </div>
-          <Link href={`/practice?database=${database.id}`}>
+          <Link href={practiceHref}>
             <Button className="w-full sm:w-auto">
               <Code2 className="mr-2 h-4 w-4" />
               Practice with this Database

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +42,113 @@ interface SQLEditorProps {
   onComplete?: (isCorrect: boolean) => void;
 }
 
+function normalizeCellValue(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return String(value);
+}
+
+function rowFingerprint(row: Record<string, unknown>, columns: string[]): string {
+  const cells = columns.map((col) => normalizeCellValue(row[col]));
+  return JSON.stringify(cells);
+}
+
+function buildFrequencyMap(values: string[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const value of values) {
+    map.set(value, (map.get(value) || 0) + 1);
+  }
+  return map;
+}
+
+function haveEquivalentResultSets(
+  actual: QueryExecutionResult,
+  expected: QueryExecutionResult,
+): boolean {
+  if (actual.columns.length !== expected.columns.length) return false;
+  if (actual.rows.length !== expected.rows.length) return false;
+
+  const actualFingerprints = actual.rows.map((row) => rowFingerprint(row, actual.columns));
+  const expectedFingerprints = expected.rows.map((row) => rowFingerprint(row, expected.columns));
+
+  const actualMap = buildFrequencyMap(actualFingerprints);
+  const expectedMap = buildFrequencyMap(expectedFingerprints);
+
+  if (actualMap.size !== expectedMap.size) return false;
+
+  for (const [key, count] of expectedMap) {
+    if (actualMap.get(key) !== count) return false;
+  }
+
+  return true;
+}
+
+function splitSqlCsv(input: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i];
+
+    if (char === "'" && !inDouble) {
+      inSingle = !inSingle;
+      current += char;
+      continue;
+    }
+
+    if (char === '"' && !inSingle) {
+      inDouble = !inDouble;
+      current += char;
+      continue;
+    }
+
+    if (!inSingle && !inDouble) {
+      if (char === "(") depth++;
+      else if (char === ")") depth = Math.max(0, depth - 1);
+
+      if (char === "," && depth === 0) {
+        if (current.trim()) parts.push(current.trim());
+        current = "";
+        continue;
+      }
+    }
+
+    current += char;
+  }
+
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function formatSqlForDisplay(sql: string): string {
+  const condensed = sql.replace(/\s+/g, " ").trim();
+  const match = condensed.match(/^(select\s+)([\s\S]*?)(\s+from\b[\s\S]*)$/i);
+
+  let formatted = condensed;
+
+  if (match) {
+    const columns = splitSqlCsv(match[2]);
+    if (columns.length > 1) {
+      formatted = `${match[1]}\n  ${columns.join(",\n  ")}\n${match[3].trimStart()}`;
+    }
+  }
+
+  return formatted
+    .replace(/\s+(from)\b/gi, "\n$1")
+    .replace(/\s+(left\s+join|right\s+join|inner\s+join|full\s+join|cross\s+join|join)\b/gi, "\n$1")
+    .replace(/\s+(on)\b/gi, "\n  $1")
+    .replace(/\s+(where)\b/gi, "\n$1")
+    .replace(/\s+(group\s+by)\b/gi, "\n$1")
+    .replace(/\s+(having)\b/gi, "\n$1")
+    .replace(/\s+(order\s+by)\b/gi, "\n$1")
+    .replace(/\s+(limit)\b/gi, "\n$1")
+    .trim();
+}
+
 export function SQLEditor({ question, onComplete }: SQLEditorProps) {
   const [sql, setSql] = useState(question.starterSql);
   const [result, setResult] = useState<{
@@ -56,6 +163,65 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
   const [queryOutput, setQueryOutput] = useState<QueryExecutionResult | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isRunningQuery, setIsRunningQuery] = useState(false);
+  const [resolvedExpectedOutput, setResolvedExpectedOutput] =
+    useState<QueryExecutionResult | null>(null);
+  const [expectedOutputError, setExpectedOutputError] = useState<string | null>(null);
+  const [isLoadingExpectedOutput, setIsLoadingExpectedOutput] = useState(false);
+
+  useEffect(() => {
+    setResolvedExpectedOutput(null);
+    setExpectedOutputError(null);
+    setIsLoadingExpectedOutput(false);
+  }, [question.id]);
+
+  useEffect(() => {
+    if (!showExpectedOutput) return;
+
+    if (question.expectedRows.length > 0) {
+      setResolvedExpectedOutput({
+        columns: question.expectedColumns,
+        rows: question.expectedRows,
+      });
+      setExpectedOutputError(null);
+      setIsLoadingExpectedOutput(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadExpectedOutput = async () => {
+      setIsLoadingExpectedOutput(true);
+      setExpectedOutputError(null);
+
+      try {
+        const result = await executeSqlQuery(question.expectedSql, question.database);
+        if (!cancelled) {
+          setResolvedExpectedOutput({
+            columns: result.columns.length > 0 ? result.columns : question.expectedColumns,
+            rows: result.rows,
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Unable to load expected output for this question.";
+          setExpectedOutputError(message);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingExpectedOutput(false);
+        }
+      }
+    };
+
+    loadExpectedOutput();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showExpectedOutput, question]);
 
   const handleCheck = useCallback(async () => {
     setIsRunningQuery(true);
@@ -63,22 +229,56 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
     setQueryError(null);
 
     const checkResult = checkSqlAnswer(sql, question);
-    setResult(checkResult);
-    
-    // Save progress
-    markQuestionComplete(question.id, question.topic, checkResult.isCorrect);
-    
-    if (onComplete) {
-      onComplete(checkResult.isCorrect);
-    }
+    let finalResult = checkResult;
 
     try {
       const output = await executeSqlQuery(sql, question.database);
       setQueryOutput(output);
+
+      if (!checkResult.isCorrect) {
+        let expectedOutput: QueryExecutionResult;
+
+        if (question.expectedRows.length > 0) {
+          expectedOutput = {
+            columns: question.expectedColumns,
+            rows: question.expectedRows,
+          };
+        } else {
+          const generatedExpected = await executeSqlQuery(
+            question.expectedSql,
+            question.database,
+          );
+          expectedOutput = {
+            columns:
+              generatedExpected.columns.length > 0
+                ? generatedExpected.columns
+                : question.expectedColumns,
+            rows: generatedExpected.rows,
+          };
+        }
+
+        if (haveEquivalentResultSets(output, expectedOutput)) {
+          finalResult = {
+            ...checkResult,
+            isCorrect: true,
+            feedback:
+              "Correct result set! Your query output matches the expected answer, even though the structure is different.",
+          };
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to run query.";
       setQueryError(message);
     } finally {
+      setResult(finalResult);
+
+      // Save progress
+      markQuestionComplete(question.id, question.topic, finalResult.isCorrect);
+
+      if (onComplete) {
+        onComplete(finalResult.isCorrect);
+      }
+
       setIsRunningQuery(false);
     }
   }, [sql, question, onComplete]);
@@ -93,6 +293,9 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
     setQueryError(null);
     setIsRunningQuery(false);
   }, [question.starterSql]);
+
+  const expectedColumns = resolvedExpectedOutput?.columns ?? question.expectedColumns;
+  const expectedRows = resolvedExpectedOutput?.rows ?? question.expectedRows;
 
   return (
     <div className="space-y-4">
@@ -190,7 +393,7 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
           </CardHeader>
           <CardContent>
             <pre className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-sm">
-              {question.expectedSql}
+              {formatSqlForDisplay(question.expectedSql)}
             </pre>
             <div className="mt-4">
               <p className="text-sm font-medium text-muted-foreground">
@@ -333,11 +536,25 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
         <CollapsibleContent>
           <Card className="mt-2">
             <CardContent className="pt-4">
+              {isLoadingExpectedOutput && (
+                <p className="mb-3 text-sm text-muted-foreground">Loading expected output...</p>
+              )}
+
+              {!isLoadingExpectedOutput && expectedOutputError && (
+                <p className="mb-3 text-sm text-destructive">{expectedOutputError}</p>
+              )}
+
+              {!isLoadingExpectedOutput && !expectedOutputError && expectedRows.length === 0 && (
+                <p className="mb-3 text-sm text-muted-foreground">
+                  No expected rows are available for this question yet.
+                </p>
+              )}
+
               <div className="rounded-lg border overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow className="bg-muted/50">
-                      {question.expectedColumns.map((col) => (
+                      {expectedColumns.map((col) => (
                         <TableHead key={col} className="font-mono text-xs">
                           {col}
                         </TableHead>
@@ -345,9 +562,9 @@ export function SQLEditor({ question, onComplete }: SQLEditorProps) {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {question.expectedRows.map((row, idx) => (
+                    {expectedRows.map((row, idx) => (
                       <TableRow key={idx}>
-                        {question.expectedColumns.map((col) => (
+                        {expectedColumns.map((col) => (
                           <TableCell key={col} className="font-mono text-xs">
                             {String(row[col] ?? "NULL")}
                           </TableCell>

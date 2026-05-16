@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
@@ -63,11 +63,13 @@ const difficulties: Difficulty[] = ["beginner", "intermediate", "interview"];
 
 export function PracticeClient() {
   const searchParams = useSearchParams();
+  const hasInitializedQuestionFromUrl = useRef(false);
   
   // Get initial filters from URL
   const initialDatabase = searchParams.get("database") as DatabaseName | null;
   const initialTopic = searchParams.get("topic") as Topic | null;
   const initialDifficulty = searchParams.get("difficulty") as Difficulty | null;
+  const initialQuestionId = searchParams.get("questionId");
 
   const [selectedDatabase, setSelectedDatabase] = useState<string>(
     initialDatabase || "all"
@@ -104,6 +106,18 @@ export function PracticeClient() {
     ? getDatabase(currentQuestion.database)
     : null;
 
+  const practiceStateHref = useMemo(() => {
+    const params = new URLSearchParams();
+
+    if (selectedDatabase !== "all") params.set("database", selectedDatabase);
+    if (selectedTopic !== "all") params.set("topic", selectedTopic);
+    if (selectedDifficulty !== "all") params.set("difficulty", selectedDifficulty);
+    if (currentQuestion) params.set("questionId", currentQuestion.id);
+
+    const query = params.toString();
+    return query ? `/practice?${query}` : "/practice";
+  }, [selectedDatabase, selectedTopic, selectedDifficulty, currentQuestion]);
+
   const handleNext = () => {
     if (currentQuestionIndex < filteredQuestions.length - 1) {
       setCurrentQuestionIndex(currentQuestionIndex + 1);
@@ -129,6 +143,19 @@ export function PracticeClient() {
   useEffect(() => {
     setCurrentQuestionIndex(0);
   }, [selectedDatabase, selectedTopic, selectedDifficulty]);
+
+  // Restore question index from URL once on first load.
+  useEffect(() => {
+    if (hasInitializedQuestionFromUrl.current) return;
+    hasInitializedQuestionFromUrl.current = true;
+
+    if (!initialQuestionId || filteredQuestions.length === 0) return;
+
+    const idx = filteredQuestions.findIndex((q) => q.id === initialQuestionId);
+    if (idx >= 0 && idx !== currentQuestionIndex) {
+      setCurrentQuestionIndex(idx);
+    }
+  }, [initialQuestionId, filteredQuestions, currentQuestionIndex]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -355,7 +382,12 @@ export function PracticeClient() {
                   </Card>
                 )}
 
-                <Link href={`/databases/${currentQuestion?.database}`}>
+                <Link
+                  href={`/databases/${currentQuestion?.database}?from=${encodeURIComponent(practiceStateHref)}`}
+                  onClick={() => {
+                    window.history.replaceState(null, "", practiceStateHref);
+                  }}
+                >
                   <Button variant="outline" className="w-full">
                     View Full Schema
                   </Button>

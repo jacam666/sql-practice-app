@@ -157,6 +157,35 @@ async function run() {
   )
   assert.equal(joinRunnerResult.rows.length, 3, "Expected grouped continent counts to return 3 rows")
 
+  const duplicateNameRunnerResult = await executeSqlQuery(
+    "SELECT c.name, c.day_of_week, t.name FROM CLASSES as c JOIN TRAINERS as t ON c.trainer_id = t.trainer_id",
+    "gym",
+  )
+  assert.equal(duplicateNameRunnerResult.rows.length, 5, "Expected 5 class rows in class/trainer join")
+  assert.equal(
+    duplicateNameRunnerResult.columns.length,
+    3,
+    "Expected duplicate column names to be preserved as separate output columns",
+  )
+  assert.ok(
+    duplicateNameRunnerResult.columns.includes("name") &&
+      duplicateNameRunnerResult.columns.includes("day_of_week") &&
+      duplicateNameRunnerResult.columns.some((c) => c !== "name" && c.endsWith("_name")),
+    "Expected output columns to include class name, day_of_week, and an auto-aliased trainer name",
+  )
+
+  await assert.rejects(
+    executeSqlQuery(
+      "SELECT c.name, c.day_of_week, t.name, FROM CLASSES as c JOIN TRAINERS as t ON c.trainer_id = t.trainer_id",
+      "gym",
+    ),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      return message.includes("remove the extra comma before FROM")
+    },
+    "Expected a friendly trailing-comma syntax message",
+  )
+
   console.log("SQL checker tests passed")
 }
 
